@@ -1,5 +1,4 @@
 import asyncio
-import random
 import json
 import logging
 import re
@@ -19,7 +18,6 @@ from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
 from playwright.async_api import async_playwright
-from playwright_stealth import Stealth
 
 load_dotenv("/root/rentscout/.env")
 logging.basicConfig(level=logging.INFO)
@@ -128,7 +126,7 @@ async def cb_stats(cb: types.CallbackQuery):
 
 async def parse_cian_page(page, page_num):
     url = "https://www.cian.ru/cat.php?deal_type=sale&offer_type=flat&region=1"
-    url += "&minarea=38&maxarea=150&maxprice=100000000&floornl=1&object_type%5B0%5D=2"
+    url += "&minarea=38&maxarea=150&maxprice=100000000&floornl=1"
     for d in TTK_DISTRICTS.values():
         url += f"&district%5B%5D={d}"
     url += f"&p={page_num}"
@@ -136,105 +134,60 @@ async def parse_cian_page(page, page_num):
     results = []
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-        await asyncio.sleep(random.uniform(2, 4))
+        await asyncio.sleep(3)
         
-        # Try new Cian structure with data-testid
-        cards = await page.query_selector_all('[data-testid="offer-card"]')
-        if not cards:
-            # Fallback to article tags
-            cards = await page.query_selector_all("article[data-name='CardComponent']")
-        if not cards:
-            cards = await page.query_selector_all("article")
+        articles = await page.query_selector_all("article")
         
-        logger.info(f"Page {page_num}: found {len(cards)} cards")
-        
-        for card in cards:
+        for art in articles:
             try:
-                link_el = await card.query_selector('a[href*="/flat/"]')
+                link_el = await art.query_selector("a[href*=\"/flat/\"]")
                 if not link_el: continue
                 link = await link_el.get_attribute("href")
                 
                 eid = re.search(r"/flat/(\d+)/", link)
                 if not eid or eid.group(1) in parsed_ids: continue
                 
-                # Get all text from card
-                text = await card.inner_text()
+                title_el = await art.query_selector("[data-name=\TitleComponent\]")
+                title = await title_el.inner_text() if title_el else ""
                 
-                # Parse rooms
-                rooms_m = re.search(r'(\d+)-комн', text)
-                rooms = rooms_m.group(1) if rooms_m else "?"
+                addr_el = await art.query_selector("[data-name=\GeoLabel\]")
+                addr = await addr_el.inner_text() if addr_el else ""
                 
-                # Parse area
-                area_m = re.search(r'(\d+(?:[.,]\d+)?)\s*м[²2]?', text)
-                area = float(area_m.group(1).replace(",", ".")) if area_m else 0
+                price_el = await art.query_selector("[data-name=\Price\]")
+                price_txt = await price_el.inner_text() if price_el else "0"
+                price = int(re.sub(r"\D", "", price_txt) or 0)
                 
-                # Parse floor
-                floor_m = re.search(r'(\d+)/(\d+)\s*(?:этаж|эт)', text)
-                floor = f"{floor_m.group(1)}/{floor_m.group(2)}" if floor_m else "?"
+                rooms_m = re.search(r"(\d+)-комн", title)
+                area_m = re.search(r"(\d+(?:,\d+)?)\s*м", title)
+                floor_m = re.search(r"(\d+)/(\d+)", title)
                 
-                # Parse price - find numbers in millions range
-                price = 0
-                price_patterns = [
-                    r'(\d{1,3}[\s\xa0]?\d{3}[\s\xa0]?\d{3})',  # 100 000 000
-                    r'(\d{2,3}[\s\xa0]?\d{3}[\s\xa0]?\d{3})',   # 50 000 000
-                ]
-                for pat in price_patterns:
-                    price_m = re.search(pat, text)
-                    if price_m:
-                        price = int(re.sub(r'\D', '', price_m.group(1)))
-                        if 1_000_000 < price < 200_000_000:
+                if price > 0 and area_m:
+                    area = float(area_m.group(1).replace(",", "."))
+                    district = "ЦАО"
+                    for d in TTK_DISTRICTS.keys():
+                        if d.lower() in addr.lower():
+                            district = d
                             break
-                        price = 0
-                
-                if price == 0:
-                    # Alternative: find any 8+ digit number
-                    all_nums = re.findall(r'\d[\d\s\xa0]{6,}', text)
-                    for n in all_nums:
-                        clean = int(re.sub(r'\D', '', n))
-                        if 1_000_000 < clean < 200_000_000:
-                            price = clean
-                            break
-                
-                if price == 0 or area == 0:
-                    continue
-                
-                # Get address
-                addr = ""
-                addr_el = await card.query_selector('[data-testid="address"]')
-                if not addr_el:
-                    addr_el = await card.query_selector('[class*="address"], [class*="geo"]')
-                if addr_el:
-                    addr = await addr_el.inner_text()
-                else:
-                    # Try to extract from text - look for street patterns
-                    addr_m = re.search(r'(?:ул\.|улица|пер\.|бул\.|наб\.|пр-т)[^,\n]+', text)
-                    if addr_m:
-                        addr = addr_m.group(0)
-                
-                district = "ЦАО"
-                for d in TTK_DISTRICTS.keys():
-                    if d.lower() in addr.lower() or d.lower() in text.lower():
-                        district = d
-                        break
-                
-                results.append({
-                    "external_id": eid.group(1),
-                    "link": link,
-                    "rooms": rooms,
-                    "area": area,
-                    "floor": floor,
-                    "address": addr,
-                    "district": district,
-                    "price": price,
-                    "price_m2": round(price / area) if area > 0 else 0,
-                })
+                    
+                    results.append({
+                        "external_id": eid.group(1),
+                        "link": link,
+                        "rooms": rooms_m.group(1) if rooms_m else "?",
+                        "area": area,
+                        "floor": f"{floor_m.group(1)}/{floor_m.group(2)}" if floor_m else "?",
+                        "address": addr,
+                        "district": district,
+                        "price": price,
+                        "price_m2": int(price / area),
+                        "date": datetime.now().strftime("%d.%m.%Y")
+                    })
             except Exception as e:
-                logger.warning(f"Card parse error: {e}")
-                continue
+                pass
     except Exception as e:
-        logger.error(f"Page {page_num} error: {e}")
+        logger.error(f"Parse error: {e}")
     
     return results
+
 async def do_search(chat_id):
     global daily_count, parsed_ids
     
@@ -244,14 +197,7 @@ async def do_search(chat_id):
     
     p = await async_playwright().start()
     browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-    context = await browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        viewport={"width": 1920, "height": 1080},
-        locale="ru-RU"
-    )
-    page = await context.new_page()
-    stealth = Stealth()
-    await stealth.apply_stealth_async(page)
+    page = await browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
     
     new_count = 0
     try:
@@ -283,9 +229,9 @@ async def do_search(chat_id):
                         f"✅ Добавлено в таблицу (#{sheet_id})"
                     )
                     await bot.send_message(chat_id, txt)
-                    await asyncio.sleep(random.uniform(0.3, 1.0))
+                    await asyncio.sleep(0.5)
             
-            await asyncio.sleep(random.uniform(1.5, 3.5))
+            await asyncio.sleep(2)
     finally:
         await browser.close()
         await p.stop()

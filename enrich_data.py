@@ -1,4 +1,5 @@
 import asyncio
+import random
 import re
 import gspread
 from google.oauth2.service_account import Credentials
@@ -157,7 +158,7 @@ async def enrich_records():
                 logger.info(f"  Found: {data}")
             
             # Delay between requests
-            await asyncio.sleep(4)
+            await asyncio.sleep(random.uniform(3, 6))
             
             # Batch update every 10 rows
             if len(updates) >= 10:
