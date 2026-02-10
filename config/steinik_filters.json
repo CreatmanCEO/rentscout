@@ -1,0 +1,14 @@
+{
+    "location": "Moscow",
+    "area_range": {"min": 38, "max": 150},
+    "price_max": 100000000,
+    "floor": {"not_first": true, "not_last": true},
+    "fund_type": ["new", "old"],
+    "renovation": ["designer", "euro"],
+    "parking": "preferred",
+    "seller_type": ["owner", "developer"],
+    "sources": ["cian", "avito"],
+    "update_interval_minutes": 30,
+    "notify_telegram": true,
+    "export_to_sheets": true
+}

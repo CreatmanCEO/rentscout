@@ -9,3 +9,10 @@ python-dotenv
 pandas
 elasticsearch
 python-multipart
+playwright
+aiogram>=3.0.0
+gspread
+google-auth
+google-auth-oauthlib
+pydantic-settings
+lxml
