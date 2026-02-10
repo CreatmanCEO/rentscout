@@ -6,3 +6,5 @@
 *.key
 __pycache__/
 *.pyc
+config/google_creds.json
+*.log
