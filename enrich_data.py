@@ -1,4 +1,7 @@
 import asyncio
+import os
+from dotenv import load_dotenv
+load_dotenv("/root/rentscout/.env")
 import random
 import re
 import gspread
@@ -11,7 +14,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 CREDS_PATH = "/root/rentscout/config/google_creds.json"
-SPREADSHEET_ID = "1mhG5ZMukBw2xAXZHs42fBpa1hde7agNlPqBFU6WMayY"
+SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID")
 
 def get_sheet():
     creds = Credentials.from_service_account_file(

@@ -1,41 +1,26 @@
 import asyncio
 import random
-import json
 import logging
 import re
 import sys
 import os
 import sqlite3
-from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, "/root/rentscout")
-
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters.command import Command
-from aiogram.enums import ParseMode
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.client.default import DefaultBotProperties
-from dotenv import load_dotenv
 
 import gspread
 from google.oauth2.service_account import Credentials
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
+from dotenv import load_dotenv
 
 load_dotenv("/root/rentscout/.env")
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_CHAT_ID", 0))
 SPREADSHEET_ID = os.getenv("GOOGLE_SPREADSHEET_ID")
 CREDS_PATH = os.getenv("GOOGLE_CREDS_PATH")
-
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher()
-
-search_task = None
 DB_PATH = "/root/rentscout/parsed_listings.db"
 
 def init_db():
@@ -65,29 +50,6 @@ def add_listing_to_db(listing_id, link, price, district):
         conn.close()
     except Exception as e:
         logger.error(f"Error adding to DB: {e}")
-
-def get_parsed_count():
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM parsed_listings")
-        count = cursor.fetchone()[0]
-        conn.close()
-        return count
-    except:
-        return 0
-
-daily_count = 0
-parsed_ids = set()
-MAX_DAILY = 100
-
-TTK_DISTRICTS = {
-    "Арбат":13,"Басманный":14,"Замоскворечье":15,"Красносельский":16,
-    "Мещанский":17,"Пресненский":18,"Таганский":19,"Тверской":20,
-    "Хамовники":21,"Якиманка":22,"Беговой":94,"Савёловский":96,
-    "Марьина Роща":160,"Сокольники":149,"Лефортово":150,
-    "Южнопортовый":154,"Даниловский":136,"Донской":137,"Дорогомилово":109
-}
 
 def get_sheets_client():
     creds = Credentials.from_service_account_file(
@@ -123,60 +85,11 @@ def add_to_sheet(data):
             ""
         ]
         ws.append_row(row)
+        logger.info(f"✅ Added to sheet #{next_id}: {data.get('address', 'N/A')[:50]}")
         return next_id
     except Exception as e:
         logger.error(f"Sheets error: {e}")
         return None
-
-def main_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔍 Поиск", callback_data="search")],
-        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")]
-    ])
-
-@dp.message(Command("start"))
-async def cmd_start(msg: types.Message):
-    await msg.answer("🏠 <b>RealtyHunter</b>\n\nПоиск недвижимости ТТК (ЦАО)", reply_markup=main_kb())
-
-@dp.message(Command("stop"))
-async def cmd_stop(msg: types.Message):
-    global search_task
-    if search_task:
-        search_task.cancel()
-        search_task = None
-        await msg.answer("⏹ Поиск остановлен")
-    else:
-        await msg.answer("Поиск не запущен")
-
-@dp.message(Command("search"))
-async def cmd_search(msg: types.Message):
-    global search_task
-    if search_task and not search_task.done():
-        await msg.answer("Поиск уже запущен!")
-        return
-    await msg.answer("🔍 Запуск поиска...")
-    search_task = asyncio.create_task(do_search(msg.chat.id))
-
-@dp.callback_query(F.data == "back")
-async def cb_back(cb: types.CallbackQuery):
-    await cb.message.edit_text("🏠 <b>RealtyHunter</b>", reply_markup=main_kb())
-    await cb.answer()
-
-@dp.callback_query(F.data == "settings")
-async def cb_settings(cb: types.CallbackQuery):
-    await cb.message.edit_text("⚙️ Районы: ТТК (19 районов)\nЛимит: 100/день",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️", callback_data="back")]]))
-    await cb.answer()
-
-@dp.callback_query(F.data == "stats")
-async def cb_stats(cb: types.CallbackQuery):
-    status = "активен" if search_task else "остановлен"
-    txt = f"📊 <b>Статистика</b>\n\nНайдено: {get_parsed_count()}\nСегодня: {daily_count}/{MAX_DAILY}\nПоиск: {status}"
-    await cb.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="◀️", callback_data="back")]]))
-    await cb.answer()
-
 
 async def parse_cian_page(page, page_num):
     url = "https://www.cian.ru/cat.php?deal_type=sale&offer_type=flat&region=1"
@@ -188,6 +101,7 @@ async def parse_cian_page(page, page_num):
 
     results = []
     try:
+        logger.info(f"Loading page {page_num}...")
         await page.goto(url, wait_until="domcontentloaded", timeout=45000)
         await asyncio.sleep(random.uniform(2, 4))
 
@@ -313,11 +227,6 @@ async def parse_cian_page(page, page_num):
                 elif building == "Новый": seller = "Застройщик"
 
                 district = "ЦАО"
-                for d in TTK_DISTRICTS.keys():
-                    if d.lower() in addr.lower() or d.lower() in text.lower():
-                        district = d
-                        break
-
                 cao_districts = ['якиманка', 'замоскворечье', 'хамовники', 'арбат', 'таганский',
                                 'пресненский', 'тверской', 'басманный', 'красносельский', 'мещанский']
 
@@ -325,15 +234,16 @@ async def parse_cian_page(page, page_num):
                 for cao_d in cao_districts:
                     if cao_d in text_lower or cao_d in addr.lower():
                         in_cao = True
+                        district = cao_d.capitalize()
                         break
 
                 if not in_cao:
-                    logger.info(f"🚫 Пропущен (не ЦАО): {addr[:50] if addr else 'N/A'}")
+                    logger.info(f"🚫 Skipped (not CAO): {addr[:50] if addr else 'N/A'}")
                     continue
 
                 bad_keywords = ['без отделки', 'черновая', 'предчистовая', 'под ремонт', 'требует ремонта']
                 if any(bad in text_lower for bad in bad_keywords):
-                    logger.info(f"🚫 Пропущен (без ремонта): {addr[:50] if addr else 'N/A'}")
+                    logger.info(f"🚫 Skipped (no renovation): {addr[:50] if addr else 'N/A'}")
                     continue
 
                 results.append({
@@ -360,12 +270,11 @@ async def parse_cian_page(page, page_num):
 
     return results
 
-async def do_search(chat_id):
-    global daily_count, parsed_ids
-
-    if daily_count >= MAX_DAILY:
-        await bot.send_message(chat_id, f"⚠️ Достигнут лимит {MAX_DAILY} объектов на сегодня")
-        return
+async def main():
+    init_db()
+    logger.info("=" * 60)
+    logger.info("ТЕСТОВЫЙ ЗАПУСК ПАРСЕРА")
+    logger.info("=" * 60)
 
     p = await async_playwright().start()
     browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
@@ -378,74 +287,55 @@ async def do_search(chat_id):
     stealth = Stealth()
     await stealth.apply_stealth_async(page)
 
-    new_count = 0
-    try:
-        for pn in range(1, 6):
-            if daily_count >= MAX_DAILY:
-                break
+    total_added = 0
+    total_found = 0
+    stats = {
+        "address_filled": 0,
+        "building_filled": 0,
+        "renovation_filled": 0,
+        "parking_filled": 0,
+        "seller_filled": 0,
+        "area_living_filled": 0,
+    }
 
-            await bot.send_message(chat_id, f"📄 Страница {pn}...")
+    try:
+        for pn in range(1, 3):  # Только 2 страницы для теста
             results = await parse_cian_page(page, pn)
+            total_found += len(results)
 
             for r in results:
-                if daily_count >= MAX_DAILY:
-                    break
-                if r["external_id"] in parsed_ids:
-                    continue
-
-                parsed_ids.add(r["external_id"])
                 sheet_id = add_to_sheet(r)
                 add_listing_to_db(r["external_id"], r["link"], r["price"], r["district"])
-                logger.info(f"✅ Добавлено: {r['address'][:50]}, Фонд:{r['building']}, Ремонт:{r['renovation']}, Парковка:{r['parking']}, Продавец:{r['seller']}")
 
                 if sheet_id:
-                    daily_count += 1
-                    new_count += 1
-                    txt = (
-                        f"🏠 <b>{r['rooms']}к, {r['area']} м²</b>\n"
-                        f"📍 {r['district']}\n"
-                        f"🏢 {r['floor']} этаж | {r['building']}\n"
-                        f"🎨 {r['renovation'] if r['renovation'] else 'Не указан'}\n"
-                        f"🚗 {r['parking'] if r['parking'] else 'Не указана'}\n"
-                        f"👤 {r['seller'] if r['seller'] else 'Не указан'}\n"
-                        f"💰 {r['price']//1000000:.1f} млн ({r['price_m2']:,} ₽/м²)\n"
-                        f"<a href=\"{r['link']}\">Смотреть на Циан</a>\n"
-                        f"✅ Добавлено в таблицу (#{sheet_id})"
-                    )
-                    await bot.send_message(chat_id, txt)
-                    await asyncio.sleep(random.uniform(0.3, 1.0))
+                    total_added += 1
+                    if r.get("address"): stats["address_filled"] += 1
+                    if r.get("building"): stats["building_filled"] += 1
+                    if r.get("renovation"): stats["renovation_filled"] += 1
+                    if r.get("parking"): stats["parking_filled"] += 1
+                    if r.get("seller"): stats["seller_filled"] += 1
+                    if r.get("area_living"): stats["area_living_filled"] += 1
 
-            await asyncio.sleep(random.uniform(1.5, 3.5))
+                    logger.info(f"  • Фонд: {r.get('building', 'N/A')}, Ремонт: {r.get('renovation', 'N/A')}, Парковка: {r.get('parking', 'N/A')}, Продавец: {r.get('seller', 'N/A')}")
+
+            await asyncio.sleep(random.uniform(2, 4))
     finally:
         await browser.close()
         await p.stop()
 
-    await bot.send_message(chat_id, f"✅ Готово! Новых: {new_count}, всего сегодня: {daily_count}/{MAX_DAILY}")
-
-async def search_loop(chat_id):
-    while True:
-        try:
-            await do_search(chat_id)
-        except Exception as e:
-            logger.error(f"Search loop error: {e}")
-            await bot.send_message(chat_id, f"❌ Ошибка: {str(e)[:100]}")
-        await asyncio.sleep(1800)
-
-@dp.callback_query(F.data == "search")
-async def cb_search(cb: types.CallbackQuery):
-    global search_task
-    if search_task and not search_task.done():
-        await cb.answer("Поиск уже запущен!")
-        return
-    await cb.answer("🔍 Запуск поиска...")
-    await cb.message.edit_text("🔍 <b>Поиск запущен</b>\n/stop для остановки",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Меню", callback_data="back")]]))
-    search_task = asyncio.create_task(search_loop(cb.message.chat.id))
-
-async def main():
-    init_db()
-    logger.info("RealtyHunter v3.1 FIXED started")
-    await dp.start_polling(bot)
+    logger.info("=" * 60)
+    logger.info(f"РЕЗУЛЬТАТЫ ТЕСТА:")
+    logger.info(f"  Найдено объектов: {total_found}")
+    logger.info(f"  Добавлено в таблицу: {total_added}")
+    if total_added > 0:
+        logger.info(f"  Заполнение полей:")
+        logger.info(f"    Адрес: {stats['address_filled']}/{total_added} ({stats['address_filled']*100//total_added}%)")
+        logger.info(f"    Фонд: {stats['building_filled']}/{total_added} ({stats['building_filled']*100//total_added}%)")
+        logger.info(f"    Ремонт: {stats['renovation_filled']}/{total_added} ({stats['renovation_filled']*100//total_added}%)")
+        logger.info(f"    Парковка: {stats['parking_filled']}/{total_added} ({stats['parking_filled']*100//total_added}%)")
+        logger.info(f"    Продавец: {stats['seller_filled']}/{total_added} ({stats['seller_filled']*100//total_added}%)")
+        logger.info(f"    Жилая площадь: {stats['area_living_filled']}/{total_added} ({stats['area_living_filled']*100//total_added}%)")
+    logger.info("=" * 60)
 
 if __name__ == "__main__":
     asyncio.run(main())
