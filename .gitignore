@@ -1,10 +1,41 @@
-
-# Secrets
-.env
-.env.*
-*.pem
-*.key
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Credentials
+.env
 config/google_creds.json
+*.json
+!requirements.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
 *.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp files
+*.tmp
+*.bak
+*.backup
+app/telegram_bot/bot_broken.py
+app/telegram_bot/bot_working.py
