@@ -1,12 +1,9 @@
 import asyncio
 import random
-import json
 import logging
 import re
 import sys
 import os
-import sqlite3
-from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, "/root/rentscout")
@@ -36,57 +33,13 @@ bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 dp = Dispatcher()
 
 search_task = None
-DB_PATH = "/root/rentscout/parsed_listings.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("""CREATE TABLE IF NOT EXISTS parsed_listings (
-            listing_id TEXT PRIMARY KEY, parsed_date TEXT, link TEXT, price INTEGER, district TEXT)""")
-    conn.commit()
-    conn.close()
-    logger.info(f"Database initialized: {DB_PATH}")
-
-def is_listing_parsed(listing_id):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM parsed_listings WHERE listing_id = ?", (listing_id,))
-    exists = cursor.fetchone() is not None
-    conn.close()
-    return exists
-
-def add_listing_to_db(listing_id, link, price, district):
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""INSERT OR IGNORE INTO parsed_listings (listing_id, parsed_date, link, price, district)
-            VALUES (?, ?, ?, ?, ?)""", (listing_id, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), link, price, district))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        logger.error(f"Error adding to DB: {e}")
-
-def get_parsed_count():
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM parsed_listings")
-        count = cursor.fetchone()[0]
-        conn.close()
-        return count
-    except:
-        return 0
-
-daily_count = 0
 parsed_ids = set()
-MAX_DAILY = 100
+MAX_PER_SEARCH = 100
 
 TTK_DISTRICTS = {
     "Арбат":13,"Басманный":14,"Замоскворечье":15,"Красносельский":16,
     "Мещанский":17,"Пресненский":18,"Таганский":19,"Тверской":20,
-    "Хамовники":21,"Якиманка":22,"Беговой":94,"Савёловский":96,
-    "Марьина Роща":160,"Сокольники":149,"Лефортово":150,
-    "Южнопортовый":154,"Даниловский":136,"Донской":137,"Дорогомилово":109
+    "Хамовники":21,"Якиманка":22
 }
 
 def get_sheets_client():
@@ -95,6 +48,31 @@ def get_sheets_client():
     )
     return gspread.authorize(creds)
 
+def clean_url(url):
+    if "?" in url:
+        url = url.split("?")[0]
+    if not url.endswith("/"):
+        url += "/"
+    return url
+
+def load_existing_ids_from_sheet():
+    global parsed_ids
+    try:
+        sheet = get_sheets_client().open_by_key(SPREADSHEET_ID).worksheet("Объекты")
+        data = sheet.get_all_values()
+        count = 0
+        for row in data[1:]:
+            if len(row) > 3 and row[3]:
+                m = re.search(r"/flat/(\d+)", row[3])
+                if m:
+                    parsed_ids.add(m.group(1))
+                    count += 1
+        logger.info(f"Loaded {count} existing IDs from sheet")
+        return count
+    except Exception as e:
+        logger.error(f"Error loading IDs: {e}")
+        return 0
+
 def add_to_sheet(data):
     try:
         client = get_sheets_client()
@@ -102,11 +80,14 @@ def add_to_sheet(data):
         ws = sheet.worksheet("Объекты")
         rows = ws.get_all_values()
         next_id = len(rows)
+
+        clean_link = clean_url(data.get("link", ""))
+
         row = [
             str(next_id),
             data.get("date", datetime.now().strftime("%d.%m.%Y")),
             "Циан",
-            data.get("link", ""),
+            clean_link,
             data.get("address", "")[:80],
             data.get("district", "ЦАО"),
             str(data.get("area", "")),
@@ -125,19 +106,28 @@ def add_to_sheet(data):
         ws.append_row(row)
         return next_id
     except Exception as e:
-        logger.error(f"Sheets error: {e}")
+        logger.error(f"Sheet error: {e}")
         return None
 
 def main_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔍 Поиск", callback_data="search")],
-        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")]
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
+        [InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings")]
     ])
 
 @dp.message(Command("start"))
 async def cmd_start(msg: types.Message):
-    await msg.answer("🏠 <b>RealtyHunter</b>\n\nПоиск недвижимости ТТК (ЦАО)", reply_markup=main_kb())
+    await msg.answer("🏠 <b>RealtyHunter v4</b>\n\nПоиск недвижимости ЦАО", reply_markup=main_kb())
+
+@dp.message(Command("search"))
+async def cmd_search(msg: types.Message):
+    global search_task
+    if search_task and not search_task.done():
+        await msg.answer("⚠️ Поиск уже запущен! /stop для остановки")
+        return
+    await msg.answer("🔍 Запуск поиска...")
+    search_task = asyncio.create_task(do_search(msg.chat.id))
 
 @dp.message(Command("stop"))
 async def cmd_stop(msg: types.Message):
@@ -149,41 +139,44 @@ async def cmd_stop(msg: types.Message):
     else:
         await msg.answer("Поиск не запущен")
 
-@dp.message(Command("search"))
-async def cmd_search(msg: types.Message):
-    global search_task
-    if search_task and not search_task.done():
-        await msg.answer("Поиск уже запущен!")
-        return
-    await msg.answer("🔍 Запуск поиска...")
-    search_task = asyncio.create_task(do_search(msg.chat.id))
+@dp.message(Command("reload"))
+async def cmd_reload(msg: types.Message):
+    count = load_existing_ids_from_sheet()
+    await msg.answer(f"🔄 Загружено {count} ID из таблицы")
 
 @dp.callback_query(F.data == "back")
 async def cb_back(cb: types.CallbackQuery):
-    await cb.message.edit_text("🏠 <b>RealtyHunter</b>", reply_markup=main_kb())
+    await cb.message.edit_text("🏠 <b>RealtyHunter v4</b>", reply_markup=main_kb())
     await cb.answer()
 
 @dp.callback_query(F.data == "settings")
 async def cb_settings(cb: types.CallbackQuery):
-    await cb.message.edit_text("⚙️ Районы: ТТК (19 районов)\nЛимит: 100/день",
+    await cb.message.edit_text(f"⚙️ Районы: ЦАО (10)\nЛимит: {MAX_PER_SEARCH}/поиск\nID: {len(parsed_ids)}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️", callback_data="back")]]))
     await cb.answer()
 
 @dp.callback_query(F.data == "stats")
 async def cb_stats(cb: types.CallbackQuery):
-    status = "активен" if search_task else "остановлен"
-    txt = f"📊 <b>Статистика</b>\n\nНайдено: {get_parsed_count()}\nСегодня: {daily_count}/{MAX_DAILY}\nПоиск: {status}"
-    await cb.message.edit_text(txt, reply_markup=InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="◀️", callback_data="back")]]))
+    status = "активен" if search_task and not search_task.done() else "остановлен"
+    await cb.message.edit_text(f"📊 ID: {len(parsed_ids)}\nПоиск: {status}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️", callback_data="back")]]))
     await cb.answer()
 
+@dp.callback_query(F.data == "search")
+async def cb_search(cb: types.CallbackQuery):
+    global search_task
+    if search_task and not search_task.done():
+        await cb.answer("Поиск уже запущен!")
+        return
+    await cb.answer("🔍 Запуск...")
+    await cb.message.edit_text("🔍 <b>Поиск запущен</b>\n/stop для остановки",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️", callback_data="back")]]))
+    search_task = asyncio.create_task(do_search(cb.message.chat.id))
 
 async def parse_cian_page(page, page_num):
     url = "https://www.cian.ru/cat.php?deal_type=sale&offer_type=flat&region=1"
     url += "&decoration[0]=1&decoration[0]=2&decoration[0]=3"
-    url += "&minarea=40&maxarea=150"
-    url += "&maxprice=100000000"
-    url += "&floornl=1"
+    url += "&minarea=40&maxarea=150&maxprice=100000000&floornl=1"
     url += f"&p={page_num}"
 
     results = []
@@ -193,155 +186,92 @@ async def parse_cian_page(page, page_num):
 
         cards = await page.query_selector_all('[data-testid="offer-card"]')
         if not cards:
-            cards = await page.query_selector_all("article[data-name='CardComponent']")
-        if not cards:
             cards = await page.query_selector_all("article")
 
-        logger.info(f"Page {page_num}: found {len(cards)} cards")
+        logger.info(f"Page {page_num}: {len(cards)} cards")
 
         for card in cards:
             try:
                 link_el = await card.query_selector('a[href*="/flat/"]')
                 if not link_el: continue
-                link = await link_el.get_attribute("href")
+                link = clean_url(await link_el.get_attribute("href"))
 
                 eid = re.search(r"/flat/(\d+)/", link)
-                if not eid or is_listing_parsed(eid.group(1)): continue
+                if not eid: continue
+
+                listing_id = eid.group(1)
+                if listing_id in parsed_ids:
+                    continue
 
                 text = await card.inner_text()
+                text_lower = text.lower()
 
+                # Фильтр ЦАО
+                cao = ['якиманка', 'замоскворечье', 'хамовники', 'арбат', 'таганский',
+                       'пресненский', 'тверской', 'басманный', 'красносельский', 'мещанский']
+
+                district = ""
+                for d in cao:
+                    if d in text_lower:
+                        district = d.capitalize()
+                        break
+
+                if not district:
+                    continue
+
+                # Фильтр ремонта
+                bad = ['без отделки', 'черновая', 'предчистовая', 'требует ремонта']
+                if any(b in text_lower for b in bad):
+                    continue
+
+                # Парсинг данных
                 rooms_m = re.search(r'(\d+)-комн', text)
-                rooms = rooms_m.group(1) if rooms_m else "?"
+                rooms = rooms_m.group(1) if rooms_m else ("Студия" if "студия" in text_lower else "?")
 
                 area_m = re.search(r'(\d+(?:[.,]\d+)?)\s*м[²2]?', text)
                 area = float(area_m.group(1).replace(",", ".")) if area_m else 0
-
-                area_living = 0
-                living_patterns = [
-                    r'(?:жилая|living)[^\d]*(\d+(?:[.,]\d+)?)\s*м',
-                    r'(\d+(?:[.,]\d+)?)\s*м[²2]?[^\d]*жил',
-                ]
-                for pat in living_patterns:
-                    living_m = re.search(pat, text, re.I)
-                    if living_m:
-                        area_living = float(living_m.group(1).replace(',', '.'))
-                        break
 
                 floor_m = re.search(r'(\d+)/(\d+)\s*(?:этаж|эт)', text)
                 floor = f"{floor_m.group(1)}/{floor_m.group(2)}" if floor_m else "?"
 
                 price = 0
-                price_patterns = [
-                    r'(\d{1,3}[\s\xa0]?\d{3}[\s\xa0]?\d{3})',
-                    r'(\d{2,3}[\s\xa0]?\d{3}[\s\xa0]?\d{3})',
-                ]
-                for pat in price_patterns:
-                    price_m = re.search(pat, text)
-                    if price_m:
-                        price = int(re.sub(r'\D', '', price_m.group(1)))
-                        if 1_000_000 < price < 200_000_000:
+                for pat in [r'(\d{1,3}[\s\xa0]?\d{3}[\s\xa0]?\d{3})']:
+                    pm = re.search(pat, text)
+                    if pm:
+                        price = int(re.sub(r'\D', '', pm.group(1)))
+                        if 5_000_000 < price < 200_000_000:
                             break
                         price = 0
-
-                if price == 0:
-                    all_nums = re.findall(r'\d[\d\s\xa0]{6,}', text)
-                    for n in all_nums:
-                        clean = int(re.sub(r'\D', '', n))
-                        if 1_000_000 < clean < 200_000_000:
-                            price = clean
-                            break
 
                 if price == 0 or area == 0:
                     continue
 
                 addr = ""
-
-                addr_el = await card.query_selector('[data-testid="address"]')
+                addr_el = await card.query_selector('[data-testid="address"], [class*="geo"]')
                 if addr_el:
-                    addr = (await addr_el.inner_text()).strip()
-
-                if not addr:
-                    addr_el = await card.query_selector('[class*="geo"], [class*="address"], a[href*="address"]')
-                    if addr_el:
-                        addr = (await addr_el.inner_text()).strip()
-
-                if not addr:
-                    addr_patterns = [
-                        r'((?:ЦАО|ЮАО|САО|ВАО|ЗАО|СВАО|ЮВАО|СЗАО|ЮЗАО),?\s+р-н\s+[^,\n]+(?:,\s+[^,\n]+){1,3})',
-                        r'((?:Якиманка|Замоскворечье|Хамовники|Арбат|Таганский|Пресненский|Тверской|Басманный|Красносельский|Мещанский)[^,\n]*,\s*[^,\n]+)',
-                        r'((?:ул\.|улица|пер\.|переулок|проезд|наб\.|набережная|бул\.|бульвар|пр-т|просп\.|проспект)\s*[^,\n]+(?:,\s*\d+[^,\n]*)?)',
-                    ]
-                    for pattern in addr_patterns:
-                        m = re.search(pattern, text, re.I)
-                        if m:
-                            addr = m.group(1).strip()
-                            break
-
-                if not addr:
-                    addr_m = re.search(r'([А-Яа-я\s]+,\s*\d+[А-Яа-я\s,]*)', text)
-                    if addr_m:
-                        addr = addr_m.group(1).strip()
+                    addr = await addr_el.inner_text()
 
                 renovation = ""
-                text_lower = text.lower()
-                if 'дизайнерск' in text_lower: renovation = "Дизайнерский"
-                elif 'евроремонт' in text_lower or 'евро' in text_lower: renovation = "Евро"
-                elif 'косметическ' in text_lower: renovation = "Косметический"
-                elif 'чистовая' in text_lower or 'чистовой' in text_lower: renovation = "Чистовая"
-                elif 'предчистовая' in text_lower or 'предчистовой' in text_lower: renovation = "Предчистовая"
-                elif 'под отделку' in text_lower or 'без отделки' in text_lower or 'черновая' in text_lower: renovation = "Без ремонта"
-                elif 'требует ремонт' in text_lower: renovation = "Требует ремонта"
+                if "дизайнерский" in text_lower: renovation = "Дизайнерский"
+                elif "евро" in text_lower: renovation = "Евро"
+                elif "косметический" in text_lower: renovation = "Косметический"
 
-                building = ""
-                if 'новостройк' in text_lower or 'новый фонд' in text_lower or 'от застройщик' in text_lower:
-                    building = "Новый"
-                elif 'вторичн' in text_lower or 'вторичка' in text_lower:
-                    building = "Вторичка"
-                else:
-                    building = "Вторичка"
+                building = "Новый" if "новостройк" in text_lower or "застройщик" in text_lower else "Вторичка"
 
                 parking = ""
-                if 'подземн' in text_lower and 'парковк' in text_lower: parking = "Подземная"
-                elif 'наземн' in text_lower and 'парковк' in text_lower: parking = "Наземная"
-                elif 'машиномест' in text_lower: parking = "Есть"
-                elif 'парковк' in text_lower: parking = "Есть"
+                if "подземн" in text_lower and "парковк" in text_lower: parking = "Подземная"
+                elif "парковк" in text_lower: parking = "Есть"
 
                 seller = ""
-                if 'застройщик' in text_lower: seller = "Застройщик"
-                elif 'собственник' in text_lower: seller = "Собственник"
-                elif 'агент' in text_lower or 'агентство' in text_lower: seller = "Агентство"
-                elif building == "Новый": seller = "Застройщик"
-
-                district = "ЦАО"
-                for d in TTK_DISTRICTS.keys():
-                    if d.lower() in addr.lower() or d.lower() in text.lower():
-                        district = d
-                        break
-
-                cao_districts = ['якиманка', 'замоскворечье', 'хамовники', 'арбат', 'таганский',
-                                'пресненский', 'тверской', 'басманный', 'красносельский', 'мещанский']
-
-                in_cao = False
-                for cao_d in cao_districts:
-                    if cao_d in text_lower or cao_d in addr.lower():
-                        in_cao = True
-                        break
-
-                if not in_cao:
-                    logger.info(f"🚫 Пропущен (не ЦАО): {addr[:50] if addr else 'N/A'}")
-                    continue
-
-                bad_keywords = ['без отделки', 'черновая', 'предчистовая', 'под ремонт', 'требует ремонта']
-                if any(bad in text_lower for bad in bad_keywords):
-                    logger.info(f"🚫 Пропущен (без ремонта): {addr[:50] if addr else 'N/A'}")
-                    continue
+                if "застройщик" in text_lower: seller = "Застройщик"
+                elif "собственник" in text_lower: seller = "Собственник"
+                elif "агент" in text_lower: seller = "Агентство"
 
                 results.append({
-                    "external_id": eid.group(1),
+                    "external_id": listing_id,
                     "link": link,
                     "rooms": rooms,
                     "area": area,
-                    "area_living": area_living,
                     "floor": floor,
                     "address": addr,
                     "district": district,
@@ -353,7 +283,6 @@ async def parse_cian_page(page, page_num):
                     "seller": seller,
                 })
             except Exception as e:
-                logger.warning(f"Card parse error: {e}")
                 continue
     except Exception as e:
         logger.error(f"Page {page_num} error: {e}")
@@ -361,90 +290,66 @@ async def parse_cian_page(page, page_num):
     return results
 
 async def do_search(chat_id):
-    global daily_count, parsed_ids
+    global parsed_ids
 
-    if daily_count >= MAX_DAILY:
-        await bot.send_message(chat_id, f"⚠️ Достигнут лимит {MAX_DAILY} объектов на сегодня")
-        return
+    await bot.send_message(chat_id, f"🔍 Поиск (лимит: {MAX_PER_SEARCH}, известных: {len(parsed_ids)})")
 
     p = await async_playwright().start()
-    browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
-    context = await browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-        viewport={"width": 1920, "height": 1080},
-        locale="ru-RU"
-    )
-    page = await context.new_page()
+    browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+
     stealth = Stealth()
+
+    context = await browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        viewport={"width": 1920, "height": 1080}
+    )
+
+    page = await context.new_page()
     await stealth.apply_stealth_async(page)
 
     new_count = 0
+
     try:
-        for pn in range(1, 6):
-            if daily_count >= MAX_DAILY:
+        for page_num in range(1, 6):
+            if new_count >= MAX_PER_SEARCH:
                 break
 
-            await bot.send_message(chat_id, f"📄 Страница {pn}...")
-            results = await parse_cian_page(page, pn)
+            results = await parse_cian_page(page, page_num)
 
             for r in results:
-                if daily_count >= MAX_DAILY:
+                if new_count >= MAX_PER_SEARCH:
                     break
+
                 if r["external_id"] in parsed_ids:
                     continue
 
                 parsed_ids.add(r["external_id"])
                 sheet_id = add_to_sheet(r)
-                add_listing_to_db(r["external_id"], r["link"], r["price"], r["district"])
-                logger.info(f"✅ Добавлено: {r['address'][:50]}, Фонд:{r['building']}, Ремонт:{r['renovation']}, Парковка:{r['parking']}, Продавец:{r['seller']}")
 
                 if sheet_id:
-                    daily_count += 1
                     new_count += 1
-                    txt = (
-                        f"🏠 <b>{r['rooms']}к, {r['area']} м²</b>\n"
-                        f"📍 {r['district']}\n"
-                        f"🏢 {r['floor']} этаж | {r['building']}\n"
-                        f"🎨 {r['renovation'] if r['renovation'] else 'Не указан'}\n"
-                        f"🚗 {r['parking'] if r['parking'] else 'Не указана'}\n"
-                        f"👤 {r['seller'] if r['seller'] else 'Не указан'}\n"
-                        f"💰 {r['price']//1000000:.1f} млн ({r['price_m2']:,} ₽/м²)\n"
-                        f"<a href=\"{r['link']}\">Смотреть на Циан</a>\n"
-                        f"✅ Добавлено в таблицу (#{sheet_id})"
-                    )
-                    await bot.send_message(chat_id, txt)
-                    await asyncio.sleep(random.uniform(0.3, 1.0))
+                    logger.info(f"+ #{sheet_id}: {r['district']}, {r['price']:,}")
 
-            await asyncio.sleep(random.uniform(1.5, 3.5))
+                    txt = f"🏠 <b>{r['rooms']}к, {r['area']}м²</b>\n📍 {r['district']}\n💰 {r['price']:,}₽\n<a href=\"{r['link']}\">CIAN</a>"
+                    await bot.send_message(chat_id, txt, disable_web_page_preview=True)
+                    await asyncio.sleep(0.3)
+
+            await asyncio.sleep(random.uniform(2, 4))
+
+    except asyncio.CancelledError:
+        logger.info("Search cancelled")
+    except Exception as e:
+        logger.error(f"Search error: {e}")
+        await bot.send_message(chat_id, f"❌ Ошибка: {str(e)[:100]}")
     finally:
         await browser.close()
         await p.stop()
 
-    await bot.send_message(chat_id, f"✅ Готово! Новых: {new_count}, всего сегодня: {daily_count}/{MAX_DAILY}")
-
-async def search_loop(chat_id):
-    while True:
-        try:
-            await do_search(chat_id)
-        except Exception as e:
-            logger.error(f"Search loop error: {e}")
-            await bot.send_message(chat_id, f"❌ Ошибка: {str(e)[:100]}")
-        await asyncio.sleep(1800)
-
-@dp.callback_query(F.data == "search")
-async def cb_search(cb: types.CallbackQuery):
-    global search_task
-    if search_task and not search_task.done():
-        await cb.answer("Поиск уже запущен!")
-        return
-    await cb.answer("🔍 Запуск поиска...")
-    await cb.message.edit_text("🔍 <b>Поиск запущен</b>\n/stop для остановки",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Меню", callback_data="back")]]))
-    search_task = asyncio.create_task(search_loop(cb.message.chat.id))
+    await bot.send_message(chat_id, f"✅ Готово! Добавлено: {new_count}")
 
 async def main():
-    init_db()
-    logger.info("RealtyHunter v3.1 FIXED started")
+    load_existing_ids_from_sheet()
+    logger.info(f"RealtyHunter v4 started (IDs: {len(parsed_ids)})")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
