@@ -1,118 +1,67 @@
-# RentScout: Your Reliable Rental Data Aggregator 🌍🏠
+# RentScout
 
-![RentScout Logo](https://img.shields.io/badge/RentScout-API-blue?style=for-the-badge&logo=appveyor)
+[![License](https://img.shields.io/badge/license-Commercial-orange.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/CreatmanCEO/rentscout?style=flat)](https://github.com/CreatmanCEO/rentscout/stargazers)
+[![Validate](https://github.com/CreatmanCEO/rentscout/actions/workflows/validate.yml/badge.svg)](https://github.com/CreatmanCEO/rentscout/actions/workflows/validate.yml)
+![Status](https://img.shields.io/badge/status-commercial-orange)
+![Platform](https://img.shields.io/badge/platform-Python%20%7C%20FastAPI-009688?logo=fastapi&logoColor=white)
 
-Welcome to **RentScout**, a high-performance API designed for aggregating rental data from leading platforms. Whether you're a developer looking to integrate rental data into your application or a researcher seeking insights into housing trends, RentScout provides the tools you need.
+[Русская версия](README.ru.md)
 
-## Table of Contents
+> **Commercial product. This repository hosts the public surface — README, API docs, configuration scaffolding. Parser internals and operational pieces are proprietary.**
 
-- [Features](#features)
-- [Getting Started](#getting-started)
-- [Installation](#installation)
-- [Usage](#usage)
-- [API Endpoints](#api-endpoints)
-- [Contributing](#contributing)
-- [License](#license)
-- [Contact](#contact)
-- [Releases](#releases)
+RentScout is a FastAPI service that aggregates Russian rental and short-term-stay listings from Avito, Cian, Yandex Travel, Sutochno, Ostrovok, Otello, and Tvil into a single normalized API. It is built for back-office tooling, market research, and client-facing rental dashboards that need one schema across many sources.
 
-## Features
+## Why this exists
 
-- **Data Aggregation**: Collects rental data from multiple sources including Avito, Cian, and Yandex.
-- **FastAPI**: Built on FastAPI for high performance and ease of use.
-- **Docker Support**: Easily deploy with Docker and Docker Compose.
-- **Real-time Data**: Get the latest rental listings as they become available.
-- **Redis Caching**: Fast access to frequently requested data.
-- **SQL Database**: Store and query data efficiently.
+Each rental platform exposes a different schema, different filter vocabulary, and different anti-bot posture. Stitching them together inside a downstream app means writing seven adapters, seven cache strategies, and seven bug surfaces. RentScout collapses that into one HTTP API: same query, same response shape, same SLA assumptions.
 
-## Getting Started
+## How it works
 
-To start using RentScout, follow the instructions below. Make sure you have the necessary tools installed, including Docker and Docker Compose.
+1. **API** — FastAPI receives a search query (geo, dates, price band, room count, source filter).
+2. **Search service** plans which parsers to run in parallel and merges their results.
+3. **Parsers** — per-source modules (`app/parsers/<source>`) for Avito, Cian, Yandex Travel, Sutochno, Ostrovok, Otello, Tvil.
+4. **Cache** — Redis-backed layer keyed by query fingerprint to absorb repeat traffic.
+5. **Filter** service applies post-fetch normalization and dedupes near-identical listings.
+6. **Storage** — SQLAlchemy + Alembic schema for persistent listings, run history, and audit.
+7. **Telegram bot** (optional) exposes the same data to operators for alerts and ad-hoc queries.
 
-### Prerequisites
+See [`docs/architecture.svg`](docs/architecture.svg) and [`docs/API.md`](docs/API.md).
 
-- Docker
-- Docker Compose
-- Python 3.7 or higher
+## Tech stack
 
-## Installation
+| Layer | Tools |
+|---|---|
+| API | FastAPI, Uvicorn |
+| Async parsing | httpx, asyncio |
+| HTML | lxml / BeautifulSoup |
+| DB | PostgreSQL + SQLAlchemy + Alembic |
+| Cache | Redis |
+| Tasks | APScheduler / background tasks |
+| Bot | aiogram (operator interface) |
+| Deploy | Docker, docker-compose |
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/Soasu/rentscout.git
-   cd rentscout
-   ```
+## API surface (excerpt)
 
-2. Build and run the Docker containers:
-   ```bash
-   docker-compose up --build
-   ```
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | liveness |
+| `GET` | `/v1/search` | unified search across configured sources |
+| `GET` | `/v1/sources` | enabled parsers and their capabilities |
+| `GET` | `/v1/listing/{id}` | single normalized listing |
 
-3. Access the API at `http://localhost:8000`.
+Full reference: [`docs/API.md`](docs/API.md).
 
-## Usage
+## Limitations
 
-After starting the API, you can use it to access rental data. Below are examples of how to make requests.
+- Public repo is **not a runnable product**. Some directories (`app/`, `docker/`, `scripts/`) hold scaffolding; production parsers and ops live elsewhere.
+- Source platforms change HTML and anti-bot defenses frequently — production maintenance is a paid service, not a community one.
+- Geo coverage is Russia-centric; international rentals are not in scope.
+- Rate, freshness, and uptime targets are negotiated per deployment; no public SLA.
+- Some parsers depend on residential-quality proxies; without them, request success drops sharply.
 
-### Example Request
+## Inquiries
 
-To get rental listings, send a GET request to the following endpoint:
+Commercial inquiries, integrations, custom parsers: **creatmanick@gmail.com** · [creatman.site](https://creatman.site).
 
-```http
-GET /api/rentals
-```
-
-### Example Response
-
-You will receive a JSON response containing rental listings:
-
-```json
-{
-  "listings": [
-    {
-      "id": 1,
-      "title": "2-bedroom apartment in the city center",
-      "price": 1500,
-      "source": "Avito"
-    },
-    ...
-  ]
-}
-```
-
-## API Endpoints
-
-Here are some key API endpoints you can use:
-
-- **Get all rentals**: `GET /api/rentals`
-- **Get rental by ID**: `GET /api/rentals/{id}`
-- **Search rentals**: `GET /api/rentals/search?query={search_term}`
-
-## Contributing
-
-We welcome contributions to RentScout! If you have ideas for improvements or new features, feel free to submit a pull request. 
-
-1. Fork the repository.
-2. Create a new branch.
-3. Make your changes.
-4. Submit a pull request.
-
-## License
-
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
-
-## Contact
-
-For any questions or feedback, please reach out to us via GitHub issues or directly through our contact page.
-
-## Releases
-
-You can find the latest releases of RentScout [here](https://github.com/Soasu/rentscout/releases). Download the latest version and execute it to get started with the API.
-
-![Releases Button](https://img.shields.io/badge/Latest_Releases-orange?style=for-the-badge)
-
-Visit the [Releases](https://github.com/Soasu/rentscout/releases) section for more information.
-
----
-
-Thank you for choosing RentScout! We hope you find it useful for your rental data needs.
+EOF

@@ -1,0 +1,38 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Required meta files exist
+        run: |
+          test -f LICENSE
+          test -f README.md
+          test -f README.ru.md
+          test -f CHANGELOG.md
+          test -f CONTRIBUTING.md
+          test -f docs/architecture.svg
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Syntax-check any Python in app/
+        run: |
+          if [ -d app ]; then
+            python - <<'PY'
+          import compileall, sys
+          ok = compileall.compile_dir('app', quiet=1, force=True)
+          sys.exit(0 if ok else 1)
+          PY
+          else
+            echo "no app/ dir, skipping"
+          fi
