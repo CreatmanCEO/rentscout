@@ -1,0 +1,35 @@
+COMMERCIAL LICENSE
+
+Copyright (c) 2026 Nick Podolyak (CreatmanCEO)
+
+All rights reserved.
+
+This repository contains documentation, configuration scaffolding, and
+showcase materials for RentScout — a commercial rental-data aggregation
+API. The runnable production codebase, parser internals, anti-detection
+logic, and deployment configuration are proprietary.
+
+TERMS AND CONDITIONS
+
+1. This repository is provided for evaluation, demonstration, and
+   portfolio purposes only.
+
+2. No license is granted, expressed or implied, to use, copy, modify,
+   distribute, sublicense, or create derivative works from any portion
+   of RentScout, including its source code, schemas, parser logic,
+   filter definitions, or operational configuration.
+
+3. Documentation and examples in this repository may be viewed and
+   referenced by prospective clients and collaborators. They may not
+   be reproduced for commercial use.
+
+4. RentScout was developed as commissioned and independent commercial
+   work and remains the intellectual property of its rightful owner(s).
+
+5. No warranty is provided. The materials are made available "AS IS".
+
+For commercial inquiries, licensing, or similar projects, contact:
+
+  Email:    creatmanick@gmail.com
+  Site:     https://creatman.site
+  Telegram: @Creatman_it
