@@ -52,6 +52,39 @@ See [`docs/architecture.svg`](docs/architecture.svg) and [`docs/API.md`](docs/AP
 
 Full reference: [`docs/API.md`](docs/API.md).
 
+## Supported platforms
+
+| Platform | Type | Coverage |
+|---|---|---|
+| Avito | Long-term & short-term | Russia-wide |
+| Cian | Long-term rentals | Major cities |
+| Yandex Travel | Short-term stays | Hotels & apartments |
+| Sutochno | Short-term stays | Russia & CIS |
+| Ostrovok | Short-term stays | Russia-focused |
+| Otello | Short-term stays | Russia-focused |
+| Tvil | Short-term stays | Russia-focused |
+
+## Example response
+
+```json
+{
+  "listings": [
+    {
+      "id": "avito-284719",
+      "source": "avito",
+      "title": "2-room apartment, 58 m², 7/12 floor",
+      "price": { "value": 45000, "currency": "RUB", "period": "month" },
+      "location": { "city": "Moscow", "district": "Presnensky", "lat": 55.76, "lng": 37.57 },
+      "rooms": 2,
+      "area_m2": 58,
+      "url": "https://avito.ru/...",
+      "posted_at": "2025-11-02T14:30:00Z"
+    }
+  ],
+  "meta": { "total": 142, "sources_queried": ["avito", "cian"], "cached": false }
+}
+```
+
 ## Limitations
 
 - Public repo is **not a runnable product**. Some directories (`app/`, `docker/`, `scripts/`) hold scaffolding; production parsers and ops live elsewhere.
